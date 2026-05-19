@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# OAuth tokens
+token.pickle
+
+# Credentials (never commit real secrets!)
+*.json
+!sample-credentials/
+!sample-credentials/*.json
+
+# Virtual environments
+venv/
+.env/
+
+# Output directory
+output/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
