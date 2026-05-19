@@ -1,12 +1,12 @@
-Google Docs → Markdown
+# Google Docs → Markdown
 
-Convert Google Docs documents to perfectly formatted Markdown with full structural fidelity.
+Convert Google Docs documents and Office files to perfectly formatted Markdown with full structural fidelity.
 
 ---
 
 ## Features
 
-- **Two conversion approaches** — Docs API for structural accuracy, Drive export for simplicity
+- **Three conversion approaches** — Docs API (structural), Drive export (simple), .docx download (Office files)
 - **Headings** h1–h6, TITLE, SUBTITLE → properly nested `# … ` / ## / ###` etc.
 - **Inline styling** — bold, italic, strikethrough, underline, inline code, links
 - **Lists** — bullet and numbered lists (with nesting) → indented Markdown lists
@@ -40,29 +40,33 @@ pip install -r requirements.txt
 2. Download the `client_secret.json`
 3. First run will open a browser for authentication; token is cached locally
 
-### 2 to `token.pickle`
-
 ### 3. Convert a document
 
 Find the document ID in the URL:  `https://docs.google.com/document/d/**DOC_ID_HERE**/edit`
 
 ```bash
-# Approach 1 — Docs API (full structural parsing, recommended)
+# Approach 1 — Docs API (full structural parsing, native Google Docs)
 python google_docs_to_markdown.py \
     --creds service-account-key.json \
     --auth service_account \
     YOUR_DOC_ID
 
-# Approach 2 — HTML export (simpler fallback)
+# Approach 2 — HTML export (simpler fallback, native Google Docs)
 python google_docs_to_markdown.py \
     --method export \
     --creds service-account-key.json \
     YOUR_DOC_ID
 
+# Approach 3 — .docx download (Office files uploaded to Drive)
+python google_docs_to_markdown.py \
+    --method docx \
+    --creds service-account-key.json \
+    FILE_ID
+
 # OAuth 2.0 (interactive)
 python google_docs_to_markdown.py \
     --creds client_secret.json \
-    --oauth \
+    --auth oauth \
     YOUR_DOC_ID
 ```
 
@@ -107,6 +111,15 @@ python google_docs_to_markdown.py \
     DOC_ID
 ```
 
+**Converting a .docx file (Office documents on Drive):**
+
+```bash
+python google_docs_to_markdown.py \
+    --method docx \
+    --creds keys/sa-key.json \
+    FILE_ID
+```
+
 **Using the export method (HTML → Markdown):**
 
 ```bash
@@ -127,15 +140,16 @@ python google_docs_to_markdown.py \
 
 ## Approach Comparison
 
-| Criterion | Approach 1 — Docs API (`--method api`) | Approach 2 — HTML Export (`--method export`) |
-|---|---|---|
-| **Accuracy** | Perfect structural fidelity (headings, lists, tables, inline styles) | Good for simple docs, depends on HTML conversion quality |
-| **Speed** | Slightly slower (full API response) | Fast (single export call) |
-| ** dependencies** | `google-api-python-client` | `html2text` or `markdownify` |
-| **Inline styles** | Full support (bold, italic, code, links, underline, strikethrough) | Best-effort via HTML parser |
-| **Tables** | Converted to Markdown pipe tables | Converted via HTML table → Markdown |
-| **Lists** | Proper nesting, mixed bullet/numbered | Good for flat lists |
-| **Recommended for** | Production use this unless you need speed | Use this for quick drafts or simple docs |
+| Criterion | Approach 1 — Docs API (`--method api`) | Approach 2 — HTML Export (`--method export`) | Approach 3 — .docx Download (`--method docx`) |
+|---|---|---|---|
+| **Target files** | Native Google Docs only | Native Google Docs only | `.docx` Office files on Drive |
+| **Accuracy** | Perfect structural fidelity | Depends on HTML conversion quality | Good text + images; custom Word styles → plain text |
+| **Speed** | Moderate (API response) | Fast (single export) | Slower (download + convert) |
+| **Dependencies** | `google-api-python-client` | `html2text` or `markdownify` | `mammoth` |
+| **Inline styles** | Full support (bold, italic, code, links, underline, strikethrough) | Best-effort via HTML parser | Good for basic styles; custom styles may be stripped |
+| **Tables** | Converted to Markdown pipe tables | Converted via HTML table → Markdown | Converted via mammoth |
+| **Lists** | Proper nesting, mixed bullet/numbered | Good for flat lists | Good for standard Word lists |
+| **Recommended for** | Native Google Docs (production) | Quick drafts, simple docs | Office `.docx` files uploaded to Drive |
 
 ## Output Format
 

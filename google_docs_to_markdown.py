@@ -722,6 +722,123 @@ class GoogleDocsConverter:
                 )
 
     # ------------------------------------------------------------------
+    # Check file type via Drive API
+    # ------------------------------------------------------------------
+
+    def check_file_type(self, doc_id: str) -> Dict[str, Any]:
+        """Get file metadata (name, mimeType, size) from Drive API.
+
+        Args:
+            doc_id: The file ID.
+
+        Returns:
+            Dictionary with id, name, mimeType, size.
+
+        Raises:
+            RuntimeError: On API errors.
+        """
+        if not self.drive_service:
+            raise RuntimeError("Not authenticated. Call authenticate() first.")
+
+        try:
+            import googleapiclient.errors
+            meta = self.drive_service.files().get(
+                fileId=doc_id, fields="id,name,mimeType,size"
+            ).execute()
+            return meta
+        except googleapiclient.errors.HttpError as exc:
+            status = exc.resp.status if hasattr(exc, "resp") else "unknown"
+            raise RuntimeError(
+                f"Drive API error (HTTP {status}) checking file {doc_id}: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Download .docx and convert via mammoth (Approach 3)
+    # ------------------------------------------------------------------
+
+    def docx_to_markdown(self, doc_id: str) -> Tuple[str, Dict[str, Any]]:
+        """Download a .docx file from Drive and convert to Markdown via mammoth.
+
+        Approach 3: handles Office documents (.docx) that are not native
+        Google Docs. Uses the Drive API to download the binary, then
+        mammoth to convert it to Markdown.
+
+        Args:
+            doc_id: The file ID.
+
+        Returns:
+            Tuple of (markdown_string, doc_metadata_dict).
+
+        Raises:
+            RuntimeError: On download or conversion failures.
+        """
+        if not self.drive_service:
+            raise RuntimeError("Not authenticated. Call authenticate() first.")
+
+        # 1. Check file type first
+        meta = self.check_file_type(doc_id)
+        mime = meta.get("mimeType", "")
+        file_name = meta.get("name", doc_id)
+
+        if mime != "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            log.warning(
+                "File %s has unexpected mime type: %s (expected .docx)",
+                doc_id, mime,
+            )
+
+        # 2. Download the .docx binary
+        try:
+            import googleapiclient.errors
+            request = self.drive_service.files().get_media(fileId=doc_id)
+            content = request.execute()
+            log.info("Downloaded %s (%s, %d bytes)", file_name, mime, len(content))
+        except googleapiclient.errors.HttpError as exc:
+            status = exc.resp.status if hasattr(exc, "resp") else "unknown"
+            raise RuntimeError(
+                f"Failed to download file (HTTP {status}): {exc}"
+            ) from exc
+
+        # 3. Convert via mammoth (needs a file-like object, not raw bytes)
+        try:
+            import mammoth
+            import io
+            result = mammoth.convert_to_markdown(io.BytesIO(content))
+            md_body = result.value
+            messages = result.messages
+            if messages:
+                for msg in messages:
+                    log.warning("mammoth: %s", msg.message)
+            log.info(
+                "Converted .docx to Markdown (%d chars, %d warnings)",
+                len(md_body), len(messages),
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "mammoth is not installed. Install it: pip install mammoth"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"mammoth conversion error: {exc}"
+            ) from exc
+
+        # 4. Build front matter
+        doc_meta = {"title": file_name, "mimeType": mime}
+        fm = self._build_docx_front_matter(file_name)
+        return fm + md_body, doc_meta
+
+    @staticmethod
+    def _build_docx_front_matter(file_name: str) -> str:
+        """Build YAML front matter for .docx-derived Markdown."""
+        lines = ["---"]
+        lines.append(f'title: "{Path(file_name).stem}"')
+        lines.append("source: docx-mammoth")
+        lines.append(
+            f"generated: {datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}"
+        )
+        lines.append("---\n")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -809,12 +926,14 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--method",
-        choices=["api", "export"],
+        choices=["api", "export", "docx"],
         default="api",
         help=(
             "Conversion method. 'api' (default) uses the Google Docs API for "
-            "structurally accurate Markdown. 'export' uses the Drive API export "
-            "to HTML and then converts to Markdown (simpler but may lose detail)."
+            "structurally accurate Markdown (native Google Docs only). 'export' "
+            "uses the Drive API export to HTML then Markdown (simpler). 'docx' "
+            "downloads a .docx file and converts via mammoth "
+            "(for Office documents uploaded to Drive)."
         ),
     )
     parser.add_argument(
@@ -869,6 +988,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # Approach 1: Docs API structural parsing.
                 doc = converter.get_document(doc_id)
                 md = converter.doc_to_markdown(doc)
+            elif args.method == "docx":
+                # Approach 3: download .docx and convert via mammoth.
+                md, doc = converter.docx_to_markdown(doc_id)
             else:
                 # Approach 2: HTML export.
                 md = converter.export_as_html(doc_id)
