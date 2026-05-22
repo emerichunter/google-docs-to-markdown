@@ -989,7 +989,14 @@ class GoogleDocsConverter:
                 "weasyprint is not installed. Run: pip install weasyprint"
             ) from exc
         except Exception as exc:
-            raise RuntimeError(f"PDF generation failed: {exc}") from exc
+            err_msg = str(exc)
+            if "libgobject" in err_msg or "GTK" in err_msg or "weasyprint" in err_msg.lower():
+                err_msg += (
+                    "\n\nOn Windows, install GTK3 runtime: "
+                    "https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases"
+                    "\nOr use --format md (default) to get Markdown output instead."
+                )
+            raise RuntimeError(f"PDF generation failed: {err_msg}") from exc
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1171,12 +1178,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     doc = {"title": doc_id}
                 md = _wrap_with_front_matter(md, doc)
 
+            # Always save Markdown first (may also be needed for PDF)
+            md_path = converter.save_markdown(doc, md, output_dir, "md")
+
             # Convert to PDF if requested
             if args.format == "pdf":
-                saved = converter.save_markdown(doc, md, output_dir, "pdf")
-                converter.md_to_pdf(md, saved)
+                pdf_path = md_path.with_suffix(".pdf")
+                try:
+                    converter.md_to_pdf(md, pdf_path)
+                    saved = pdf_path
+                except RuntimeError as pdf_err:
+                    log.warning(
+                        "PDF generation failed for %s: %s. "
+                        "Markdown saved as fallback at %s",
+                        doc_id, pdf_err, md_path,
+                    )
+                    saved = md_path
             else:
-                saved = converter.save_markdown(doc, md, output_dir, "md")
+                saved = md_path
+
             log.info("Successfully converted -> %s", saved)
             successes += 1
 
