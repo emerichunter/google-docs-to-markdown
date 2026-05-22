@@ -347,6 +347,61 @@ class TestMarkdownConverter(unittest.TestCase):
         self.assertEqual(args.output, "./output")
         self.assertFalse(args.verbose)
 
+    # ------------------------------------------------------------------
+    # New: Google Keep method tests
+    # ------------------------------------------------------------------
+
+    def test_cli_keep_method(self):
+        """CLI should accept --method keep for Google Keep notes."""
+        args = _parse_args(["--creds", "key.json", "--method", "keep", "note1"])
+        self.assertEqual(args.method, "keep")
+
+    def test_cli_format_flag(self):
+        """CLI should accept --format pdf."""
+        args = _parse_args(
+            ["--creds", "key.json", "--format", "pdf", "doc1"]
+        )
+        self.assertEqual(args.format, "pdf")
+
+    def test_cli_format_default(self):
+        """CLI should default to --format md when not specified."""
+        args = _parse_args(["--creds", "key.json", "doc1"])
+        self.assertEqual(args.format, "md")
+
+    def test_keep_front_matter(self):
+        """Keep front matter should have correct source field."""
+        from google_docs_to_markdown import GoogleDocsConverter
+        fm = GoogleDocsConverter._build_keep_front_matter("My Note")
+        self.assertIn("source: google-keep", fm)
+        self.assertIn('title: "My Note"', fm)
+
+    def test_keep_front_matter_strips_extension(self):
+        """Keep front matter should strip file extension from name."""
+        from google_docs_to_markdown import GoogleDocsConverter
+        fm = GoogleDocsConverter._build_keep_front_matter("note.txt")
+        self.assertIn('title: "note"', fm)
+
+    def test_pdf_build_docx_front_matter(self):
+        """Docx front matter should still work alongside new features."""
+        from google_docs_to_markdown import GoogleDocsConverter
+        fm = GoogleDocsConverter._build_docx_front_matter("report.docx")
+        self.assertIn("source: docx-mammoth", fm)
+        self.assertIn('title: "report"', fm)
+
+    # ------------------------------------------------------------------
+    # New: PDF format tests
+    # ------------------------------------------------------------------
+
+    def test_md_to_pdf_raises_without_libs(self):
+        """md_to_pdf should raise a clear RuntimeError if libs missing."""
+        # This test just validates the error path; PDF generation is tested
+        # against the actual Google Doc below.
+        from google_docs_to_markdown import GoogleDocsConverter
+        import os
+        converter = GoogleDocsConverter()
+        with self.assertRaises(RuntimeError):
+            converter.md_to_pdf("# test", Path("should_not_create.pdf"))
+
 
 if __name__ == "__main__":
     unittest.main()

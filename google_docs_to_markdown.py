@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
 """
-google_docs_to_markdown.py — Convert Google Docs documents to perfectly formatted Markdown.
+google_docs_to_markdown.py — Convert Google Docs, .docx, and Google Keep notes
+to perfectly formatted Markdown or PDF.
 
-Supports two approaches:
-  1. Google Docs API (primary) — Full structural parsing via google-api-python-client.
-  2. HTML export (fallback) — Export via Drive API, then convert HTML with html2text/markdownify.
+Supported inputs:
+  1. Google Docs API (--method api)  — Native Google Docs, full structural parsing
+  2. HTML export   (--method export) — Native Google Docs, Drive → HTML → Markdown
+  3. .docx download (--method docx)  — Office files on Drive, via mammoth
+  4. Google Keep    (--method keep)  — Keep notes via Drive export
+
+Output formats:
+  --format md   (default) — Markdown
+  --format pdf            — PDF (via weasyprint)
 
 Usage:
-    # Approach 1: Full Docs API parsing
-    python google_docs_to_markdown.py --creds client_secret.json DOC_ID [DOC_ID2 ...]
+    # Docs API parsing (default)
+    python google_docs_to_markdown.py --creds client_secret.json DOC_ID
 
-    # Approach 2: Quick HTML export
+    # Quick HTML export
     python google_docs_to_markdown.py --method export --creds service_account.json DOC_ID
 
-    # Output to specific directory
-    python google_docs_to_markdown.py --creds client_secret.json --output ./output_dir DOC_ID
+    # .docx file
+    python google_docs_to_markdown.py --method docx --creds service_account.json FILE_ID
+
+    # Google Keep note
+    python google_docs_to_markdown.py --method keep --creds service_account.json NOTE_ID
+
+    # Output as PDF
+    python google_docs_to_markdown.py --format pdf --creds service_account.json DOC_ID
+
+    # Custom output directory
+    python google_docs_to_markdown.py --creds client_secret.json --output ./docs DOC_ID
 """
 
 __version__ = "1.0.0"
@@ -29,6 +45,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+KEEP_NOTE_MIME = "application/vnd.google-apps.note"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -839,6 +861,137 @@ class GoogleDocsConverter:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Google Keep via Drive API (Approach 4)
+    # ------------------------------------------------------------------
+
+    def keep_to_markdown(self, doc_id: str) -> Tuple[str, Dict[str, Any]]:
+        """Export a Google Keep note to Markdown via the Drive API.
+
+        Keep notes are stored in Drive with mime type
+        application/vnd.google-apps.note. They are exported to HTML
+        and then converted to Markdown via html2text/markdownify.
+
+        Args:
+            doc_id: The Drive file ID of the Keep note.
+
+        Returns:
+            Tuple of (markdown_string, doc_metadata_dict).
+
+        Raises:
+            RuntimeError: On export or conversion failures.
+        """
+        if not self.drive_service:
+            raise RuntimeError("Not authenticated. Call authenticate() first.")
+
+        # Fetch metadata to get the note title
+        meta = self.check_file_type(doc_id)
+        file_name = meta.get("name", doc_id)
+        mime = meta.get("mimeType", "")
+
+        if mime != KEEP_NOTE_MIME:
+            log.warning(
+                "File %s has mime type '%s', expected '%s'",
+                doc_id, mime, KEEP_NOTE_MIME,
+            )
+
+        try:
+            import googleapiclient.errors
+            request = self.drive_service.files().export(
+                fileId=doc_id, mimeType="text/html"
+            )
+            html_content = request.execute()
+            if isinstance(html_content, bytes):
+                html_text = html_content.decode("utf-8")
+            else:
+                html_text = html_content
+        except googleapiclient.errors.HttpError as exc:
+            status = exc.resp.status if hasattr(exc, "resp") else "unknown"
+            raise RuntimeError(
+                f"Keep export error (HTTP {status}) for {doc_id}: {exc}"
+            ) from exc
+
+        # Convert HTML to Markdown
+        md_body = self._html_to_markdown(html_text)
+
+        # Build front matter
+        doc_meta = {"title": file_name, "mimeType": mime}
+        fm = self._build_keep_front_matter(file_name)
+        return fm + md_body, doc_meta
+
+    @staticmethod
+    def _build_keep_front_matter(file_name: str) -> str:
+        """Build YAML front matter for Keep-note-derived Markdown."""
+        lines = ["---"]
+        lines.append(f'title: "{Path(file_name).stem}"')
+        lines.append("source: google-keep")
+        lines.append(
+            f"generated: {datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}"
+        )
+        lines.append("---\n")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Markdown → PDF conversion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def md_to_pdf(md_content: str, output_path: Path) -> Path:
+        """Convert a Markdown string to a PDF file.
+
+        Uses the 'markdown' library to convert MD → HTML, then
+        weasyprint to convert HTML → PDF.
+
+        Args:
+            md_content: The Markdown content.
+            output_path: Desired output path (should end in .pdf).
+
+        Returns:
+            The Path to the generated PDF file.
+
+        Raises:
+            RuntimeError: If markdown or weasyprint is not installed.
+        """
+        try:
+            import markdown as md_lib
+            html_body = md_lib.markdown(
+                md_content,
+                extensions=["fenced_code", "tables", "codehilite"],
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "markdown library is not installed. Run: pip install markdown"
+            ) from exc
+
+        html_doc = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Document</title>
+<style>
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 2cm; font-size: 11pt; line-height: 1.5; }}
+  h1 {{ font-size: 20pt; margin-top: 1.5em; }}
+  h2 {{ font-size: 16pt; margin-top: 1.2em; }}
+  h3 {{ font-size: 13pt; margin-top: 1em; }}
+  code {{ background: #f4f4f4; padding: 2px 4px; border-radius: 3px; font-size: 10pt; }}
+  pre {{ background: #f4f4f4; padding: 10px; border-radius: 4px; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+  th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; }}
+  th {{ background: #eee; }}
+  img {{ max-width: 100%; }}
+</style></head>
+<body>{html_body}</body></html>"""
+
+        try:
+            from weasyprint import HTML
+            HTML(string=html_doc).write_pdf(str(output_path))
+            log.info("Generated PDF: %s", output_path)
+            return output_path
+        except ImportError as exc:
+            raise RuntimeError(
+                "weasyprint is not installed. Run: pip install weasyprint"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(f"PDF generation failed: {exc}") from exc
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -857,27 +1010,40 @@ class GoogleDocsConverter:
         return safe.strip() or "Untitled"
 
     def save_markdown(
-        self, doc: Dict[str, Any], md_content: str, output_dir: Path
+        self,
+        doc: Dict[str, Any],
+        md_content: str,
+        output_dir: Path,
+        output_format: str = "md",
     ) -> Path:
-        """Save Markdown content to a file named after the document title.
+        """Save content to a file named after the document title.
 
         Args:
             doc: The document resource (used for title extraction).
             md_content: The Markdown string to write.
             output_dir: Directory where the file will be saved.
+            output_format: 'md' (Markdown) or 'pdf' (PDF).
 
         Returns:
             The Path to the saved file.
         """
         safe_title = self.get_document_title(doc)
-        filename = f"{safe_title}.md"
+        ext = "pdf" if output_format == "pdf" else "md"
+        filename = f"{safe_title}.{ext}"
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir / filename
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(md_content)
+        if output_format == "pdf":
+            # Save the intermediate Markdown as well for reference
+            md_path = output_dir / f"{safe_title}.md"
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(md_content)
+            log.info("Saved intermediate Markdown to %s", md_path)
+        else:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(md_content)
 
-        log.info("Saved Markdown to %s", filepath)
+        log.info("Saved content to %s", filepath)
         return filepath
 
 
@@ -926,21 +1092,26 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--method",
-        choices=["api", "export", "docx"],
+        choices=["api", "export", "docx", "keep"],
         default="api",
         help=(
-            "Conversion method. 'api' (default) uses the Google Docs API for "
-            "structurally accurate Markdown (native Google Docs only). 'export' "
-            "uses the Drive API export to HTML then Markdown (simpler). 'docx' "
-            "downloads a .docx file and converts via mammoth "
-            "(for Office documents uploaded to Drive)."
+            "Conversion method. 'api' (default) — Google Docs API structural "
+            "parsing (native Docs only). 'export' — Drive HTML export + converter. "
+            "'docx' — download .docx + mammoth (Office files). "
+            "'keep' — export Google Keep note via Drive API."
         ),
+    )
+    parser.add_argument(
+        "--format",
+        choices=["md", "pdf"],
+        default="md",
+        help="Output format. 'md' (default) — Markdown. 'pdf' — PDF via weasyprint.",
     )
     parser.add_argument(
         "--output",
         "-o",
         default="./output",
-        help="Output directory for Markdown files. Default: %(default)s.",
+        help="Output directory for converted files. Default: %(default)s.",
     )
     parser.add_argument(
         "--verbose",
@@ -985,23 +1156,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log.info("Processing document: %s", doc_id)
         try:
             if args.method == "api":
-                # Approach 1: Docs API structural parsing.
                 doc = converter.get_document(doc_id)
                 md = converter.doc_to_markdown(doc)
             elif args.method == "docx":
-                # Approach 3: download .docx and convert via mammoth.
                 md, doc = converter.docx_to_markdown(doc_id)
+            elif args.method == "keep":
+                md, doc = converter.keep_to_markdown(doc_id)
             else:
-                # Approach 2: HTML export.
+                # method == "export"
                 md = converter.export_as_html(doc_id)
-                # Build minimal front matter.
                 try:
                     doc = converter.get_document(doc_id)
                 except Exception:
                     doc = {"title": doc_id}
                 md = _wrap_with_front_matter(md, doc)
 
-            saved = converter.save_markdown(doc, md, output_dir)
+            # Convert to PDF if requested
+            if args.format == "pdf":
+                saved = converter.save_markdown(doc, md, output_dir, "pdf")
+                converter.md_to_pdf(md, saved)
+            else:
+                saved = converter.save_markdown(doc, md, output_dir, "md")
             log.info("Successfully converted -> %s", saved)
             successes += 1
 
